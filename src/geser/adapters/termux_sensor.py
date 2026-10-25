@@ -52,10 +52,23 @@ class TermuxSensor:
             except OSError:
                 pass
             self._proc = None
+        self._cleanup()
+
+    def _cleanup(self) -> None:
+        try:
+            subprocess.run(
+                ["termux-sensor", "-c"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            )
+        except Exception:
+            pass
 
     def _ensure_started(self) -> None:
         if self._proc is not None and self._proc.poll() is None:
             return
+        self._cleanup()
         names = f"{self._settings.accel_sensor},{self._settings.gyro_sensor}"
         command = ["termux-sensor", "-s", names, "-d", str(self._settings.sample_interval_ms)]
         try:
