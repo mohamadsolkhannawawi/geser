@@ -12,7 +12,16 @@ from .errors import ConfigError
 from .identity import validate_project_id
 from .models import Runtime, Settings
 
-_ENV_KEYS = ("PROJECT_ID", "MQTT_HOST", "MQTT_PORT", "MQTT_TLS", "TIME_SCALE", "GESER_CONFIG")
+_ENV_KEYS = (
+    "PROJECT_ID",
+    "MQTT_HOST",
+    "MQTT_PORT",
+    "MQTT_TLS",
+    "TIME_SCALE",
+    "GESER_CONFIG",
+    "ACCEL_SENSOR",
+    "GYRO_SENSOR",
+)
 _TRUE_WORDS = {"1", "true", "yes", "ya"}
 _FALSE_WORDS = {"0", "false", "no", "tidak"}
 
@@ -101,7 +110,7 @@ def validate(s: Settings) -> None:
 
 
 def _apply_overrides(settings: Settings, env: dict[str, str]) -> Settings:
-    broker, engine = settings.broker, settings.engine
+    broker, engine, edge = settings.broker, settings.engine, settings.edge
     try:
         if "MQTT_HOST" in env:
             broker = replace(broker, host=env["MQTT_HOST"])
@@ -114,9 +123,13 @@ def _apply_overrides(settings: Settings, env: dict[str, str]) -> Settings:
             broker = replace(broker, tls=word in _TRUE_WORDS)
         if "TIME_SCALE" in env:
             engine = replace(engine, time_scale=float(env["TIME_SCALE"]))
+        if "ACCEL_SENSOR" in env:
+            edge = replace(edge, accel_sensor=env["ACCEL_SENSOR"])
+        if "GYRO_SENSOR" in env:
+            edge = replace(edge, gyro_sensor=env["GYRO_SENSOR"])
     except ValueError as exc:
         raise ConfigError(f"Nilai .env tidak valid: {exc}") from exc
-    return replace(settings, broker=broker, engine=engine)
+    return replace(settings, broker=broker, engine=engine, edge=edge)
 
 
 def load_settings(config_path: str | None = None, env: dict[str, str] | None = None) -> Settings:

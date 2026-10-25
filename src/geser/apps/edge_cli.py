@@ -6,6 +6,8 @@ import logging
 import random
 import secrets
 
+from dataclasses import replace
+
 from geser.adapters.console_actuator import ConsoleActuator
 from geser.adapters.mqtt_bus import MqttBus
 from geser.adapters.simulated_sensor import PROFILES, SimulatedSensor
@@ -29,6 +31,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="body: di saku baju dada. desk: di meja.")
     parser.add_argument("--simulate", choices=sorted(PROFILES),
                         help="pakai sensor simulasi (tanpa HP) dengan profil ini")
+    parser.add_argument("--accel-sensor", help="nama sensor akselerometer (misal: lsm6dsoq_acc)")
+    parser.add_argument("--gyro-sensor", help="nama sensor giroskop (misal: lsm6dsoq_gyro)")
     parser.add_argument("--config", help="jalur configs/default.yaml alternatif")
     parser.add_argument("--env-file", default=".env")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -41,17 +45,23 @@ def main() -> None:
     runtime = runtime_or_exit(args.config, args.env_file)
     role, clock = Role(args.role), SystemClock()
     run_id = secrets.token_hex(RUN_ID_BYTES)
+    edge_settings = runtime.settings.edge
+    if args.accel_sensor:
+        edge_settings = replace(edge_settings, accel_sensor=args.accel_sensor)
+    if args.gyro_sensor:
+        edge_settings = replace(edge_settings, gyro_sensor=args.gyro_sensor)
+    settings = replace(runtime.settings, edge=edge_settings)
     sensor: SensorReader
     if args.simulate:
         sensor = SimulatedSensor(args.simulate, clock, random.Random())
     else:
-        sensor = TermuxSensor(runtime.settings.edge, clock)
+        sensor = TermuxSensor(edge_settings, clock)
     console = ConsoleActuator()
     actuator = console if args.simulate else TermuxActuator(console)
     topics = TopicMap(runtime.project_id)
     node = EdgeNode(
-        role=role, run_id=run_id, settings=runtime.settings, topics=topics, sensor=sensor,
-        bus=MqttBus(runtime.settings.broker, f"geser-{role.value}-{run_id}"),
+        role=role, run_id=run_id, settings=settings, topics=topics, sensor=sensor,
+        bus=MqttBus(settings.broker, f"geser-{role.value}-{run_id}"),
         clock=clock, actuator=actuator,
     )
     log.info("PROJECT_ID=%s, topic dasar: %s", runtime.project_id, topics.root)
