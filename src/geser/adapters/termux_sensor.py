@@ -7,9 +7,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import threading
 from typing import IO, Any
+
+try:
+    import pty
+except ImportError:
+    pty = None
 
 from geser.domain.models import AccelSample, GyroSample, SensorBatch
 from geser.ports import Clock, SensorUnavailable
@@ -28,6 +34,7 @@ class TermuxSensor:
         self._accel: list[AccelSample] = []
         self._gyro: list[GyroSample] = []
         self._proc: subprocess.Popen[str] | None = None
+        self._stream: IO[str] | None = None
 
     def read_batch(self, duration_s: float) -> SensorBatch:
         self._ensure_started()
@@ -40,7 +47,17 @@ class TermuxSensor:
     def close(self) -> None:
         if self._proc is not None and self._proc.poll() is None:
             self._proc.terminate()
+            try:
+                self._proc.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
         self._proc = None
+        if self._stream is not None:
+            try:
+                self._stream.close()
+            except OSError:
+                pass
+            self._stream = None
 
     def _ensure_started(self) -> None:
         if self._proc is not None and self._proc.poll() is None:
@@ -48,29 +65,50 @@ class TermuxSensor:
         names = f"{self._settings.accel_sensor},{self._settings.gyro_sensor}"
         command = ["termux-sensor", "-s", names, "-d", str(self._settings.sample_interval_ms)]
         try:
-            self._proc = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
-            )
+            if pty is not None:
+                master_fd, slave_fd = pty.openpty()
+                self._proc = subprocess.Popen(
+                    command,
+                    stdout=slave_fd,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    close_fds=True,
+                )
+                os.close(slave_fd)
+                stream = os.fdopen(master_fd, "r", encoding="utf-8")
+            else:
+                self._proc = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    bufsize=1,
+                )
+                assert self._proc.stdout is not None
+                stream = self._proc.stdout
+            self._stream = stream
         except OSError as exc:
             raise SensorUnavailable(
                 "termux-sensor tidak bisa dijalankan. Pasang: pkg install termux-api "
                 "dan aplikasi Termux:API (lihat docs/SETUP.md)."
             ) from exc
-        assert self._proc.stdout is not None
-        threading.Thread(target=self._pump, args=(self._proc.stdout,), daemon=True).start()
+        threading.Thread(target=self._pump, args=(stream,), daemon=True).start()
 
     def _pump(self, stream: IO[str]) -> None:
         decoder = json.JSONDecoder()
         buffer = ""
-        for line in stream:
-            buffer = (buffer + line).lstrip()
-            while buffer:
-                try:
-                    obj, end = decoder.raw_decode(buffer)
-                except json.JSONDecodeError:
-                    break  # objek belum lengkap, tunggu baris berikutnya
-                self._ingest(obj)
-                buffer = buffer[end:].lstrip()
+        try:
+            for line in iter(stream.readline, ""):
+                buffer = (buffer + line).lstrip()
+                while buffer:
+                    try:
+                        obj, end = decoder.raw_decode(buffer)
+                    except json.JSONDecodeError:
+                        break  # objek belum lengkap, tunggu baris berikutnya
+                    self._ingest(obj)
+                    buffer = buffer[end:].lstrip()
+        except Exception:
+            log.exception("Error pada thread pembaca sensor Termux")
 
     def _ingest(self, obj: Any) -> None:
         if not isinstance(obj, dict):
