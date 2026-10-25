@@ -36,6 +36,8 @@ class TermuxSensor:
         self._proc: subprocess.Popen[str] | None = None
         self._stream: IO[str] | None = None
 
+        self._closed = False
+
     def read_batch(self, duration_s: float) -> SensorBatch:
         self._ensure_started()
         self._clock.sleep(duration_s)
@@ -45,6 +47,7 @@ class TermuxSensor:
         return batch
 
     def close(self) -> None:
+        self._closed = True
         if self._proc is not None and self._proc.poll() is None:
             self._proc.terminate()
             try:
@@ -62,6 +65,7 @@ class TermuxSensor:
     def _ensure_started(self) -> None:
         if self._proc is not None and self._proc.poll() is None:
             return
+        self._closed = False
         names = f"{self._settings.accel_sensor},{self._settings.gyro_sensor}"
         command = ["termux-sensor", "-s", names, "-d", str(self._settings.sample_interval_ms)]
         try:
@@ -107,8 +111,12 @@ class TermuxSensor:
                         break  # objek belum lengkap, tunggu baris berikutnya
                     self._ingest(obj)
                     buffer = buffer[end:].lstrip()
+        except (ValueError, OSError):
+            if not self._closed:
+                log.exception("Error I/O pada thread pembaca sensor Termux")
         except Exception:
-            log.exception("Error pada thread pembaca sensor Termux")
+            if not self._closed:
+                log.exception("Error pada thread pembaca sensor Termux")
 
     def _ingest(self, obj: Any) -> None:
         if not isinstance(obj, dict):
