@@ -46,19 +46,16 @@ class TermuxSensor:
         return batch
 
     def close(self) -> None:
-        self._closed = True
-        if self._proc is not None and self._proc.poll() is None:
-            self._proc.terminate()
+        if self._proc is not None:
             try:
-                self._proc.wait(timeout=0.3)
-            except subprocess.TimeoutExpired:
                 self._proc.kill()
-        self._proc = None
+            except OSError:
+                pass
+            self._proc = None
 
     def _ensure_started(self) -> None:
         if self._proc is not None and self._proc.poll() is None:
             return
-        self._closed = False
         names = f"{self._settings.accel_sensor},{self._settings.gyro_sensor}"
         command = ["termux-sensor", "-s", names, "-d", str(self._settings.sample_interval_ms)]
         try:
@@ -68,10 +65,11 @@ class TermuxSensor:
                     command,
                     stdout=slave_fd,
                     stderr=subprocess.DEVNULL,
+                    text=True,
                     close_fds=True,
                 )
                 os.close(slave_fd)
-                threading.Thread(target=self._pump_pty, args=(master_fd,), daemon=True).start()
+                stream = os.fdopen(master_fd, "r", encoding="utf-8")
             else:
                 self._proc = subprocess.Popen(
                     command,
@@ -81,60 +79,34 @@ class TermuxSensor:
                     bufsize=1,
                 )
                 assert self._proc.stdout is not None
-                threading.Thread(target=self._pump_stream, args=(self._proc.stdout,), daemon=True).start()
+                stream = self._proc.stdout
         except OSError as exc:
             raise SensorUnavailable(
                 "termux-sensor tidak bisa dijalankan. Pasang: pkg install termux-api "
                 "dan aplikasi Termux:API (lihat docs/SETUP.md)."
             ) from exc
+        threading.Thread(target=self._pump, args=(stream,), daemon=True).start()
 
-    def _pump_pty(self, master_fd: int) -> None:
-        decoder = json.JSONDecoder()
-        buffer = ""
-        try:
-            while not self._closed:
-                r, _, _ = select.select([master_fd], [], [], 0.2)
-                if self._closed:
-                    break
-                if master_fd in r:
-                    try:
-                        chunk = os.read(master_fd, 2048)
-                    except OSError:
-                        break
-                    if not chunk:
-                        break
-                    buffer = (buffer + chunk.decode("utf-8", errors="replace")).lstrip()
-                    while buffer:
-                        try:
-                            obj, end = decoder.raw_decode(buffer)
-                        except json.JSONDecodeError:
-                            break
-                        self._ingest(obj)
-                        buffer = buffer[end:].lstrip()
-        finally:
-            try:
-                os.close(master_fd)
-            except OSError:
-                pass
-
-    def _pump_stream(self, stream: IO[str]) -> None:
+    def _pump(self, stream: IO[str]) -> None:
         decoder = json.JSONDecoder()
         buffer = ""
         try:
             for line in iter(stream.readline, ""):
-                if self._closed:
-                    break
                 buffer = (buffer + line).lstrip()
                 while buffer:
                     try:
                         obj, end = decoder.raw_decode(buffer)
                     except json.JSONDecodeError:
-                        break
+                        break  # objek belum lengkap, tunggu baris berikutnya
                     self._ingest(obj)
                     buffer = buffer[end:].lstrip()
         except Exception:
-            if not self._closed:
-                log.exception("Error pada thread pembaca sensor Termux")
+            pass
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
 
     def _ingest(self, obj: Any) -> None:
         if not isinstance(obj, dict):
