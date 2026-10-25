@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import select
 import subprocess
 import threading
 from typing import IO, Any
@@ -34,8 +35,6 @@ class TermuxSensor:
         self._accel: list[AccelSample] = []
         self._gyro: list[GyroSample] = []
         self._proc: subprocess.Popen[str] | None = None
-        self._stream: IO[str] | None = None
-
         self._closed = False
 
     def read_batch(self, duration_s: float) -> SensorBatch:
@@ -51,16 +50,10 @@ class TermuxSensor:
         if self._proc is not None and self._proc.poll() is None:
             self._proc.terminate()
             try:
-                self._proc.wait(timeout=0.5)
+                self._proc.wait(timeout=0.3)
             except subprocess.TimeoutExpired:
                 self._proc.kill()
         self._proc = None
-        if self._stream is not None:
-            try:
-                self._stream.close()
-            except OSError:
-                pass
-            self._stream = None
 
     def _ensure_started(self) -> None:
         if self._proc is not None and self._proc.poll() is None:
@@ -75,11 +68,10 @@ class TermuxSensor:
                     command,
                     stdout=slave_fd,
                     stderr=subprocess.DEVNULL,
-                    text=True,
                     close_fds=True,
                 )
                 os.close(slave_fd)
-                stream = os.fdopen(master_fd, "r", encoding="utf-8")
+                threading.Thread(target=self._pump_pty, args=(master_fd,), daemon=True).start()
             else:
                 self._proc = subprocess.Popen(
                     command,
@@ -89,31 +81,57 @@ class TermuxSensor:
                     bufsize=1,
                 )
                 assert self._proc.stdout is not None
-                stream = self._proc.stdout
-            self._stream = stream
+                threading.Thread(target=self._pump_stream, args=(self._proc.stdout,), daemon=True).start()
         except OSError as exc:
             raise SensorUnavailable(
                 "termux-sensor tidak bisa dijalankan. Pasang: pkg install termux-api "
                 "dan aplikasi Termux:API (lihat docs/SETUP.md)."
             ) from exc
-        threading.Thread(target=self._pump, args=(stream,), daemon=True).start()
 
-    def _pump(self, stream: IO[str]) -> None:
+    def _pump_pty(self, master_fd: int) -> None:
+        decoder = json.JSONDecoder()
+        buffer = ""
+        try:
+            while not self._closed:
+                r, _, _ = select.select([master_fd], [], [], 0.2)
+                if self._closed:
+                    break
+                if master_fd in r:
+                    try:
+                        chunk = os.read(master_fd, 2048)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    buffer = (buffer + chunk.decode("utf-8", errors="replace")).lstrip()
+                    while buffer:
+                        try:
+                            obj, end = decoder.raw_decode(buffer)
+                        except json.JSONDecodeError:
+                            break
+                        self._ingest(obj)
+                        buffer = buffer[end:].lstrip()
+        finally:
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+
+    def _pump_stream(self, stream: IO[str]) -> None:
         decoder = json.JSONDecoder()
         buffer = ""
         try:
             for line in iter(stream.readline, ""):
+                if self._closed:
+                    break
                 buffer = (buffer + line).lstrip()
                 while buffer:
                     try:
                         obj, end = decoder.raw_decode(buffer)
                     except json.JSONDecodeError:
-                        break  # objek belum lengkap, tunggu baris berikutnya
+                        break
                     self._ingest(obj)
                     buffer = buffer[end:].lstrip()
-        except (ValueError, OSError):
-            if not self._closed:
-                log.exception("Error I/O pada thread pembaca sensor Termux")
         except Exception:
             if not self._closed:
                 log.exception("Error pada thread pembaca sensor Termux")
