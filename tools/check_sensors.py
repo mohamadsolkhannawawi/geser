@@ -22,11 +22,28 @@ def main() -> int:
     listed = subprocess.run(["termux-sensor", "-l"], capture_output=True, text=True, timeout=8)
     print(listed.stdout or listed.stderr)
 
-    print("2. Membaca sampel uji selama 2 detik...")
+    import argparse
+    from dataclasses import replace
+
+    parser = argparse.ArgumentParser(description="Periksa kesiapan termux-sensor.")
+    parser.add_argument("--accel-sensor", help="nama sensor akselerometer")
+    parser.add_argument("--gyro-sensor", help="nama sensor giroskop")
+    args = parser.parse_args()
+
     settings = load_settings()
-    sensor = TermuxSensor(settings.edge, SystemClock())
+    edge_settings = settings.edge
+    if args.accel_sensor:
+        edge_settings = replace(edge_settings, accel_sensor=args.accel_sensor)
+    if args.gyro_sensor:
+        edge_settings = replace(edge_settings, gyro_sensor=args.gyro_sensor)
+
+    print(
+        f"2. Membaca sampel uji selama 2 detik "
+        f"(accel='{edge_settings.accel_sensor}', gyro='{edge_settings.gyro_sensor}')..."
+    )
+    sensor = TermuxSensor(edge_settings, SystemClock())
     try:
-        batch = sensor.read_batch(settings.edge.window_s)
+        batch = sensor.read_batch(edge_settings.window_s)
     except SensorUnavailable as exc:
         print(f"Gagal membaca sensor: {exc}")
         return 1
